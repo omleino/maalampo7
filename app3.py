@@ -1,4 +1,7 @@
 # app.py — Lämmitysvaihtoehtojen vertailu (horisontti = laina-aika + 1) + PDF-raportti
+# - PDF: vain vuosittainen vastiketaulukko + vuosittainen säästötaulukko (B vs KL)
+# - PDF: kaikki numerot 2 desimaalin tarkkuudella
+# - Ei takaisinmaksuaikaa PDF:ssä (näkyy vain UI:ssa)
 
 import streamlit as st
 import matplotlib.pyplot as plt
@@ -71,10 +74,7 @@ def laske_kaukolampo_kustannukset(kustannus_vuosi0, inflaatio, vuodet: int):
 
 
 def takaisinmaksuaika_investointi(investointi, kaukolampo_sarja, maalampo_sarja):
-    """
-    Palauttaa vuoden (1-indexed), jolloin kumulatiivinen säästö (KL - ML) ylittää investoinnin.
-    Jos ei ylitä horisontissa, palauttaa None.
-    """
+    """Näkyy UI:ssa, ei PDF:ssä."""
     vuosittainen_saasto = np.array(kaukolampo_sarja) - np.array(maalampo_sarja)
     kum = np.cumsum(vuosittainen_saasto)
     for vuosi, summa in enumerate(kum, 1):
@@ -85,11 +85,7 @@ def takaisinmaksuaika_investointi(investointi, kaukolampo_sarja, maalampo_sarja)
 
 def erittely_listat(investointi, laina_aika, korko, sahkon_hinta, kulutus, inflaatio,
                     korjaus_vali, korjaus_hinta, korjaus_laina_aika, vuodet: int):
-    """
-    Palauttaa (rahoitus, lämmitys) -listat pituudella 'vuodet'.
-    Rahoitus = pääinvestoinnin lyhennys + korko.
-    Lämmitys = sähkö + korjauslainojen lyhennys + korjauslainojen korot.
-    """
+    """Palauttaa (rahoitus, lämmitys) -listat pituudella 'vuodet'."""
     rahoitus, lampo = [], []
     jaljella = investointi
     lyhennys = investointi / laina_aika if laina_aika > 0 else 0
@@ -97,7 +93,6 @@ def erittely_listat(investointi, laina_aika, korko, sahkon_hinta, kulutus, infla
     korjauslainat = []
 
     for v in range(1, vuodet + 1):
-        # Rahoitus (pääinvestointi)
         if v <= laina_aika:
             korko_v = jaljella * (korko / 100)
             rah = lyhennys + korko_v
@@ -105,7 +100,6 @@ def erittely_listat(investointi, laina_aika, korko, sahkon_hinta, kulutus, infla
         else:
             rah = 0
 
-        # Korjauslainat
         if korjaus_vali > 0 and v > 1 and (v - 1) % korjaus_vali == 0:
             korjauslainat.append({
                 "jaljella": korjaus_hinta,
@@ -123,21 +117,34 @@ def erittely_listat(investointi, laina_aika, korko, sahkon_hinta, kulutus, infla
                 l["vuosia"] -= 1
         korjauslainat = [l for l in korjauslainat if l["vuosia"] > 0]
 
-        # Lämmitys
         elec = h * kulutus
         lampo.append(elec + korjaus_lyh + korjaus_korot)
         rahoitus.append(rah)
 
-        # Sähkön hinta nousee inflaatiolla
         h *= (1 + inflaatio / 100)
 
     return rahoitus, lampo
 
 
-def luo_pdf(kaavio, pb1, pb2, pb3, lainaosuus, syotteet, vuodet_teksti):
-    """
-    Luo PDF-raportin. Sisältää vain vuosittaisen vastiketaulukon toivotussa sarakejärjestyksessä.
-    """
+def _format_df_for_pdf(df: pd.DataFrame) -> list:
+    """PDF-taulukon data: otsikkorivi + rivit, numerot 2 desimaalina."""
+    df_reset = df.reset_index()
+    header = df_reset.columns.to_list()
+    body_raw = df_reset.values.tolist()
+    body_fmt = []
+    for row in body_raw:
+        new_row = []
+        for v in row:
+            if isinstance(v, (int, float, np.integer, np.floating)):
+                new_row.append(f"{v:.2f}")
+            else:
+                new_row.append(v)
+        body_fmt.append(new_row)
+    return [header] + body_fmt
+
+
+def luo_pdf(kaavio, lainaosuus, syotteet, vuodet_teksti):
+    """PDF: kuva + vuosittainen vastiketaulukko + vuosittainen säästötaulukko."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer)
     styles = getSampleStyleSheet()
@@ -148,26 +155,20 @@ def luo_pdf(kaavio, pb1, pb2, pb3, lainaosuus, syotteet, vuodet_teksti):
 
     elements.append(Paragraph("Syötetyt arvot:", styles['Heading2']))
     for nimi, arvo in syotteet.items():
-        if nimi == "vuosittainen_df":  # ei tulosteta DataFramea tässä osiossa
+        if isinstance(arvo, pd.DataFrame):
             continue
         elements.append(Paragraph(f"{nimi}: {arvo}", styles['Normal']))
     elements.append(Spacer(1, 0.2 * inch))
 
-    # Kaavio kuvaksi
     tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
     kaavio.savefig(tmpfile.name, dpi=150, bbox_inches="tight")
     elements.append(Paragraph(f"Lämmityskustannukset {vuodet_teksti} ajalta", styles['Heading2']))
     elements.append(Image(tmpfile.name, width=6*inch, height=3*inch))
     elements.append(Spacer(1, 0.3 * inch))
 
-    # Vuosittainen taulukko
-    if "vuosittainen_df" in syotteet and syotteet["vuosittainen_df"] is not None:
-        vdf = syotteet["vuosittainen_df"].reset_index()
-        elements.append(Paragraph("Vastikkeet vuoden välein (€/m²/kk)", styles['Heading2']))
-
-        # Pakotettu sarakejärjestys
+    if "vuosittainen_df" in syotteet and isinstance(syotteet["vuosittainen_df"], pd.DataFrame):
+        vdf = syotteet["vuosittainen_df"]
         cols = [
-            "Vuosi",
             "ML A — ilman rahoitusta €/m²/kk",
             "ML B — ilman rahoitusta €/m²/kk",
             "ML C — ilman rahoitusta €/m²/kk",
@@ -176,12 +177,13 @@ def luo_pdf(kaavio, pb1, pb2, pb3, lainaosuus, syotteet, vuodet_teksti):
             "ML C — yhteensä €/m²/kk",
             "Kaukolämpö €/m²/kk",
         ]
-        # Suodatetaan mahdollisten puuttuvien varalta
         cols = [c for c in cols if c in vdf.columns]
-        vdf = vdf[cols]
+        vdf_ordered = vdf[cols]
+        vdf_ordered.index.name = "Vuosi"
 
-        taulu_v = [vdf.columns.to_list()] + vdf.values.tolist()
-        table_v = Table(taulu_v, repeatRows=1)
+        elements.append(Paragraph("Vastikkeet vuoden välein (€/m²/kk)", styles['Heading2']))
+        table_data = _format_df_for_pdf(vdf_ordered)
+        table_v = Table(table_data, repeatRows=1)
         table_v.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
             ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
@@ -192,13 +194,24 @@ def luo_pdf(kaavio, pb1, pb2, pb3, lainaosuus, syotteet, vuodet_teksti):
         elements.append(table_v)
         elements.append(Spacer(1, 0.3 * inch))
 
-    # Takaisinmaksu
-    elements.append(Paragraph("Investoinnin takaisinmaksuaika:", styles['Heading2']))
-    f_txt = lambda v: f"{v} vuotta" if v else f"ei {vuodet_teksti} ajalla"
-    elements.append(Paragraph(f"Maalämpö A: {f_txt(pb1)}", styles['Normal']))
-    elements.append(Paragraph(f"Maalämpö B: {f_txt(pb2)}", styles['Normal']))
-    elements.append(Paragraph(f"Maalämpö C: {f_txt(pb3)}", styles['Normal']))
-    elements.append(Spacer(1, 0.2 * inch))
+    if "saasto_df" in syotteet and isinstance(syotteet["saasto_df"], pd.DataFrame):
+        sdf = syotteet["saasto_df"]
+        cols_s = [c for c in ["50 m²", "74 m²", "86 m²"] if c in sdf.columns]
+        sdf_ordered = sdf[cols_s]
+        sdf_ordered.index.name = "Vuosi"
+
+        elements.append(Paragraph("Vuosittainen säästö (Maalämpö B vs. Kaukolämpö) €/vuosi per asunto", styles['Heading2']))
+        table_data_s = _format_df_for_pdf(sdf_ordered)
+        table_s = Table(table_data_s, repeatRows=1)
+        table_s.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 7),
+            ('ALIGN', (1, 1), (-1, -1), 'RIGHT'),
+        ]))
+        elements.append(table_s)
+        elements.append(Spacer(1, 0.3 * inch))
 
     elements.append(Paragraph(f"Lainaosuus: {lainaosuus:,.0f} €/m²", styles['Normal']))
     doc.build(elements)
@@ -321,12 +334,37 @@ st.download_button("⬇️ Lataa vuosittainen vastiketaulukko (CSV)",
                    file_name="vastikkeet_vuosittain.csv",
                    mime="text/csv")
 
-# Takaisinmaksuaika (dynaamisella horisontilla)
+# --- VUOSITTAINEN SÄÄSTÖ VUODESSA: Maalämpö B vs Kaukolämpö (per asunto) ---
+asunnot = [50, 74, 86]
+saasto_vuodet = list(range(1, vuodet + 1))
+
+# Vuotuinen säästö koko talolle (Kaukolämpö - Maalämpö B)
+vuosittainen_saasto_euro = [kl[y-1] - ml2[y-1] for y in saasto_vuodet]
+
+# DataFrame: rivit = vuodet, sarakkeet = asunnon koko (€/vuosi per asunto)
+saasto_df = pd.DataFrame(index=saasto_vuodet)
+for neliot_asunto in asunnot:
+    saasto_df[f"{neliot_asunto} m²"] = [
+        vuosittainen_saasto_euro[y-1] / neliot_asunto for y in saasto_vuodet
+    ]
+saasto_df.index.name = "Vuosi"
+
+st.markdown("### Vuosittainen säästö (Maalämpö B vs. Kaukolämpö) €/vuosi per asunto")
+st.dataframe(saasto_df.style.format("{:.2f}"), use_container_width=True)
+
+# CSV-lataus säästötaulukosta
+csv_saasto = saasto_df.to_csv(index=True).encode("utf-8")
+st.download_button("⬇️ Lataa säästötaulukko (CSV)",
+                   data=csv_saasto,
+                   file_name="saastot_asunnoittain.csv",
+                   mime="text/csv")
+
+# Takaisinmaksuaika (vain UI:ssa, ei PDF:ssä)
 pb1 = takaisinmaksuaika_investointi(investointi, kl, ml1)
 pb2 = takaisinmaksuaika_investointi(investointi, kl, ml2)
 pb3 = takaisinmaksuaika_investointi(investointi, kl, ml3)
 
-f_txt = lambda v: f"{v} vuotta" if v else f"ei {vuodet_teksti} ajalla"
+f_txt = lambda v: f"{int(v)} vuotta" if v and float(v).is_integer() else (f"{v:.1f} vuotta" if v else f"ei {vuodet_teksti} ajalla")
 st.markdown("### Investoinnin takaisinmaksuaika")
 st.write(f"**Maalämpö A ({h1:.2f} €/kWh):** {f_txt(pb1)}")
 st.write(f"**Maalämpö B ({h2:.2f} €/kWh):** {f_txt(pb2)}")
@@ -354,8 +392,9 @@ syotteet = {
     "Kaukolämmön inflaatio (%/v)": kl_inf,
     "Neliöt (m²)": neliot,
     "Aikajänne (vuotta)": vuodet,
-    "vuosittainen_df": vuosittainen_df  # viedään PDF:ään taulukkoa varten
+    "vuosittainen_df": vuosittainen_df,  # PDF: vastiketaulukko
+    "saasto_df": saasto_df,              # PDF: säästötaulukko
 }
 
-pdf = luo_pdf(fig, pb1, pb2, pb3, lainaosuus, syotteet, vuodet_teksti)
+pdf = luo_pdf(fig, lainaosuus, syotteet, vuodet_teksti)
 st.download_button("📄 Lataa PDF-raportti", data=pdf, file_name="lämmitysvertailu.pdf", mime="application/pdf")
