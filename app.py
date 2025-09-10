@@ -179,7 +179,7 @@ def luo_pdf(kaavio, vuosittainen_df, saasto_df, vuodet_teksti, lainaosuus, syott
 # ---------- SOVELLUS ----------
 
 st.set_page_config(page_title="Lämmitysvaihtoehdot", layout="wide")
-st.title("Maalämpö (A/B/C) vs Kaukolämpö — PDF (ei takaisinmaksuaikaa)")
+st.title("Maalämpö (A/B/C) vs Kaukolämpö — PDF ")
 
 with st.sidebar:
     st.header("Yhteiset oletukset")
